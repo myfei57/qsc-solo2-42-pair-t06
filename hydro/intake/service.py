@@ -162,7 +162,10 @@ class IntakeService:
     def offset(self, unit_id: str) -> float:
         return self._offset_value(unit_id)
 
-    def head_for_limit(self, unit_id: str) -> float:
+    def head_for_limit(self, unit_id: str, now: int | None = None) -> float:
+        if now is not None:
+            # An expired or superseded baseline cannot back an output limit.
+            self.validate_baseline(unit_id, now)
         return self.baseline(unit_id) + self.offset(unit_id)
 
     def calibrated_at(self, unit_id: str) -> int:

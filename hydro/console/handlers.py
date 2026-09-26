@@ -301,14 +301,20 @@ class HandlerSet:
     def gov_limit(self, c: Any, request: Request) -> Response:
         unit_id = request.unit_id()
         now = c.now()
-        head = c.gov.head_used(unit_id)
         payload: dict[str, Any] = {
             "unit_id": unit_id,
-            "head": head,
-            "limit_for": c.gov.limit_for(head),
             "status": c.gov.limit_status(unit_id, now),
             "output_status": c.gov.output_status(unit_id, now),
         }
+        try:
+            head = c.gov.head_used(unit_id, now)
+            payload["head"] = head
+            payload["limit_for"] = c.gov.limit_for(head)
+        except ControlError as error:
+            payload["head"] = None
+            payload["limit_for"] = None
+            payload["error"] = error.message
+            payload["code"] = error.code
         try:
             limit = c.gov.limit(unit_id, now)
             payload["limit"] = limit

@@ -31,7 +31,7 @@ from hydro.versioning.generations import SCOPE_CONFIRM, SCOPE_OIL
 
 
 class HeadLimitSource(Protocol):
-    def head_for_limit(self, unit_id: str) -> float: ...
+    def head_for_limit(self, unit_id: str, now: int | None = ...) -> float: ...
 
     def validate_baseline(self, unit_id: str, now: int) -> None: ...
 
@@ -144,6 +144,10 @@ class GovService:
     def sync_state(self, unit_id: str, now: int) -> str:
         if not self._payload(unit_id).get("sync_confirmed"):
             return "pending"
+        try:
+            self.validate_sync(unit_id, now)
+        except ControlError:
+            return "expired"
         return "confirmed"
 
     def reset_sync(self, unit_id: str) -> None:
@@ -201,14 +205,14 @@ class GovService:
 
     # ---------------------------------------------------------------- limit
 
-    def head_used(self, unit_id: str) -> float:
-        return self._intake.head_for_limit(unit_id)
+    def head_used(self, unit_id: str, now: int | None = None) -> float:
+        return self._intake.head_for_limit(unit_id, now)
 
     def limit_for(self, head: float) -> float:
         return head * OUTPUT_COEFFICIENT
 
     def limit(self, unit_id: str, now: int) -> float:
-        return self.limit_for(self.head_used(unit_id))
+        return self.limit_for(self.head_used(unit_id, now))
 
     def margin(self, unit_id: str, limit: float, now: int) -> float:
         return limit - self.limit(unit_id, now)
@@ -244,8 +248,10 @@ class GovService:
     # ------------------------------------------------------------- dispatch
 
     def dispatch(self, unit_id: str, tick: int) -> dict[str, Any]:
+        if not self._units.exists(unit_id):
+            raise NotRegisteredError("unit is not registered: " + unit_id)
         if self.overspeed(unit_id):
-            return {"released": False}
+            raise OverspeedActiveError("overspeed is active for " + unit_id)
         with self._lock:
             guide = self._guide
         if guide is None:
@@ -256,8 +262,11 @@ class GovService:
         return payload
 
     def dispatch_state(self, unit_id: str, now: int) -> str:
-        if self._intake.head_for_limit(unit_id) <= 0:
-            return "no-head"
+        try:
+            if self._intake.head_for_limit(unit_id, now) <= 0:
+                return "no-head"
+        except ControlError as error:
+            return error.code
         return "released"
 
     # ------------------------------------------------------------ overspeed
@@ -267,6 +276,10 @@ class GovService:
             brake = self._brake
             if brake is None:
                 raise OverspeedActiveError("brake controller is not wired")
+            if active:
+                # Overspeed is a trip condition: the brake latch goes on before
+                # the flag is published so a restart cannot clear the condition.
+                brake.latch(unit_id)
             self._write(unit_id, overspeed=bool(active))
             return bool(active)
 
