@@ -19,6 +19,7 @@ from hydro.domain.constants import (
 from hydro.domain.errors import (
     BrakeLatchedError,
     ControlError,
+    ExpiredArtifactError,
     GuideLatchedError,
     NotRegisteredError,
     OverspeedActiveError,
@@ -144,6 +145,12 @@ class GovService:
     def sync_state(self, unit_id: str, now: int) -> str:
         if not self._payload(unit_id).get("sync_confirmed"):
             return "pending"
+        try:
+            self.validate_sync(unit_id, now)
+        except ExpiredArtifactError:
+            return "expired"
+        except ControlError as error:
+            return error.code
         return "confirmed"
 
     def reset_sync(self, unit_id: str) -> None:
@@ -208,6 +215,7 @@ class GovService:
         return head * OUTPUT_COEFFICIENT
 
     def limit(self, unit_id: str, now: int) -> float:
+        self._intake.validate_baseline(unit_id, now)
         return self.limit_for(self.head_used(unit_id))
 
     def margin(self, unit_id: str, limit: float, now: int) -> float:
@@ -244,8 +252,17 @@ class GovService:
     # ------------------------------------------------------------- dispatch
 
     def dispatch(self, unit_id: str, tick: int) -> dict[str, Any]:
+        if not self._units.exists(unit_id):
+            raise NotRegisteredError("unit is not registered: " + unit_id)
         if self.overspeed(unit_id):
-            return {"released": False}
+            with self._lock:
+                brake = self._brake
+            if brake is None:
+                raise OverspeedActiveError("brake controller is not wired")
+            brake.latch(unit_id)
+            raise OverspeedActiveError(
+                "dispatch refused while overspeed is active for " + unit_id
+            )
         with self._lock:
             guide = self._guide
         if guide is None:
@@ -267,6 +284,8 @@ class GovService:
             brake = self._brake
             if brake is None:
                 raise OverspeedActiveError("brake controller is not wired")
+            if active:
+                brake.latch(unit_id)
             self._write(unit_id, overspeed=bool(active))
             return bool(active)
 
